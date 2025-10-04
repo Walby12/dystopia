@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
+#include <string.h>
 
 typedef enum {
     TOK_FN,
@@ -10,41 +12,95 @@ typedef enum {
 } TokenType;
 
 typedef struct {
-    TokenType **toks;
-    size_t index;
-} Tokens;
+    TokenType type;
+    char *str;
+} Token;
 
 typedef struct {
     char *cur_char;
     size_t index;
 } Lexer;
 
-Tokens tokens = {0};
+Token token = {0};
 Lexer lexer = {0};
+int line_lex = 0;
 
-TokenType get_next_tok(Lexer *l) {
-    if (sizeof(l->cur_char) < l->index) {
-        return TOK_EOF;
-    }
-    switch (l->cur_char[l->index++]) {
+Token* new_fn() {
+    Token *t = malloc(sizeof(Token));
+    t->type = TOK_FN;
+    return t;
+}
+
+Token* new_id(char *c) {
+    Token *t = malloc(sizeof(Token));
+    t->type = TOK_ID;
+    t->str = c;
+    return t;
+}
+
+Token* new_oparen() {
+    Token *t = malloc(sizeof(Token));
+    t->type = TOK_OPAREN;
+    return t;
+}
+
+Token* new_cparen() {
+    Token *t = malloc(sizeof(Token));
+    t->type = TOK_CPAREN;
+    return t;
+}
+
+Token* new_eof() {
+    Token *t = malloc(sizeof(Token));
+    t->type = TOK_EOF;
+    return t;
+}
+
+Token* get_next_tok(Lexer *l) {
+    switch (l->cur_char[l->index]) {
     case '(':
-        return TOK_OPAREN;
-        break;
+        l->index++;
+        return new_oparen();
     case ')':
-        return TOK_CPAREN;
+        l->index++;
+        return new_cparen();
+    case '\n':
+        l->index++;
+        line_lex++;
         break;
+    case ' ':  
+        l->index++;
+        break;
+    case '\t':
+        l->index++;
+        break;
+    case '\0':
+        return new_eof();
     default:
-        fprintf(stderr, "Error: unknow char: %c", l->cur_char[l->index++]);
+        if (isalpha(l->cur_char[l->index])) {
+            char str[256];
+            int j = 0;
+            while (isalpha(l->cur_char[l->index]) && j < sizeof(str) - 1) {
+                str[j++] = l->cur_char[l->index++];
+            }
+            str[j] = '\0';
+            printf("%s\n", str);
+            if (strcmp(str, "fn") == 0) {
+                return new_fn();
+            } else {
+                return new_id(strdup(str));
+            }
+        }
+        fprintf(stderr, "Error: unknow char: %c at line %d\n", l->cur_char[l->index], line_lex);
+        exit(1);
     }
 }
 
 int main() {
-    lexer.cur_char = ")";
-    TokenType tok = get_next_tok(&lexer);  
-    if (tok == TOK_OPAREN) {
-        printf("gay\n");
-    } else {
-        printf("g\n");
+    lexer.cur_char = "fn hello()";
+    Token *tok = get_next_tok(&lexer);
+    while (tok->type != TOK_EOF) {
+        tok = get_next_tok(&lexer);
     }
     return 0;
 }
