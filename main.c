@@ -3,6 +3,10 @@
 #include <ctype.h>
 #include <string.h>
 #include <stdarg.h> 
+#include <llvm-c/Core.h>
+#include <llvm-c/ExecutionEngine.h>
+#include <llvm-c/Target.h>
+#include <llvm-c/Analysis.h>
 
 typedef enum {
     TOK_FN,
@@ -15,6 +19,7 @@ typedef enum {
     TOK_OCURLY,
     TOK_CCURLY,
     TOK_STRING,
+    TOK_EMAIL,
     TOK_EOF,
 } TokenType;
 
@@ -62,12 +67,22 @@ typedef struct {
     Stmt *stmt_list;
 } ParseFunc;
 
+typedef struct {
+    LLVMModuleRef module;
+    LLVMBuilderRef builder;
+    LLVMContextRef context;
+} CodeGenerator;
+
 Token token = {0};
 Lexer lexer = {0};
+char *funcs[2048];
+int func_index = 0;
 int line_lex = 0;
+CodeGenerator *codegen = NULL; 
 
 Token* get_next_tok(Lexer *l);
 Token* new_token(TokenType type, char *str, SourceLocation loc);
+void parse(Token *t);
 
 void lexer_init(Lexer *l, const char *source, const char *filename) {
     l->cur_char = (char*)source;
@@ -200,6 +215,10 @@ Token* get_next_tok(Lexer *l) {
                 
                 return new_token(TOK_STRING, strdup(str), loc);
             }
+        case '@':
+            l->index++;
+            l->column++;
+            return new_token(TOK_EMAIL, NULL, loc);
         default:
             if (isalpha(c)) {
                 char str[256];
@@ -274,6 +293,8 @@ const char* to_string(TokenType t) {
         return "close curly";
     case TOK_STRING:
         return "string";
+    case TOK_EMAIL:
+        return "function return";
     case TOK_EOF:
         return "end of file";
     default:
@@ -324,7 +345,11 @@ ParseFunc* parse_function() {
         error_tok(func_name, "function name expected after fn");
     }
     
-    printf("Parsing function: %s\n", func_name->str);
+    if (func_index < 100) {
+        funcs[func_index++] = strdup(func_name->str);
+    } else {
+        error_tok(func_name, "too many functions (max 100)");
+    }
     
     ParseFunc *func = malloc(sizeof(ParseFunc));
     func->name = strdup(func_name->str);
@@ -333,6 +358,21 @@ ParseFunc* parse_function() {
     
     expect_token(TOK_OPAREN, "function declaration");
     expect_token(TOK_CPAREN, "function declaration");
+    expect_token(TOK_EMAIL, "function declaration"); 
+    
+    Token *func_ret = get_next_tok(&lexer);
+    if (func_ret->type != TOK_ID) {
+        error_at(func_ret->loc, "expected a valid return type");
+    }
+    
+    if (strcmp(func_ret->str, "int") == 0) {
+        func->return_type = strdup("int");
+    } else if (strcmp(func_ret->str, "void") == 0) {
+        func->return_type = strdup("void");
+    } else {
+        error_at(func_ret->loc, "unknown return type '%s'", func_ret->str);
+    }
+    
     expect_token(TOK_OCURLY, "function declaration");
     
     Token *peek = get_next_tok(&lexer);
@@ -357,27 +397,144 @@ ParseFunc* parse_function() {
     return func;
 }
 
-void execute_function(ParseFunc *func) {
-    printf("Executing function: %s\n", func->name);
-    Stmt *curr = func->stmt_list;
-    while (curr != NULL) {
-        switch (curr->type) {
-        case STMT_PRINT:
-            if (curr->data.print_stmt.value && curr->data.print_stmt.value->str) {
-                printf("%s", curr->data.print_stmt.value->str);
-            }
-            break;
-        case STMT_PRINTLN:
-            if (curr->data.println_stmt.value && curr->data.println_stmt.value->str) {
-                printf("%s\n", curr->data.println_stmt.value->str);
-            }
-            break;
-        default:
-            fprintf(stderr, "Error: unknown statement type\n");
-            break;
-        }
-        curr = curr->next;
+// Initialize code generator
+CodeGenerator* codegen_init(const char *module_name) {
+    CodeGenerator *gen = malloc(sizeof(CodeGenerator));
+    
+    gen->context = LLVMGetGlobalContext();
+    gen->module = LLVMModuleCreateWithName(module_name);
+    gen->builder = LLVMCreateBuilder();
+    
+    return gen;
+}
+
+// Generate LLVM IR for a print statement
+void codegen_print_stmt(CodeGenerator *gen, Token *value) {
+    LLVMValueRef printf_func = LLVMGetNamedFunction(gen->module, "printf");
+    if (!printf_func) {
+        LLVMTypeRef printf_type = LLVMFunctionType(
+            LLVMInt32Type(),
+            (LLVMTypeRef[]){LLVMPointerType(LLVMInt8Type(), 0)},
+            1,
+            1
+        );
+        printf_func = LLVMAddFunction(gen->module, "printf", printf_type);
     }
+    
+    LLVMValueRef str_val = LLVMBuildGlobalStringPtr(gen->builder, value->str, ".str");
+    
+    LLVMValueRef args[] = {str_val};
+    LLVMBuildCall2(
+        gen->builder,
+        LLVMFunctionType(LLVMInt32Type(), (LLVMTypeRef[]){LLVMPointerType(LLVMInt8Type(), 0)}, 1, 1),
+        printf_func,
+        args,
+        1,
+        ""
+    );
+}
+
+// Generate LLVM IR for a println statement
+void codegen_println_stmt(CodeGenerator *gen, Token *value) {
+    LLVMValueRef puts_func = LLVMGetNamedFunction(gen->module, "puts");
+    if (!puts_func) {
+        LLVMTypeRef puts_type = LLVMFunctionType(
+            LLVMInt32Type(),
+            (LLVMTypeRef[]){LLVMPointerType(LLVMInt8Type(), 0)},
+            1,
+            0
+        );
+        puts_func = LLVMAddFunction(gen->module, "puts", puts_type);
+    }
+    
+    LLVMValueRef str_val = LLVMBuildGlobalStringPtr(gen->builder, value->str, ".str");
+    
+    LLVMValueRef args[] = {str_val};
+    LLVMBuildCall2(
+        gen->builder,
+        LLVMFunctionType(LLVMInt32Type(), (LLVMTypeRef[]){LLVMPointerType(LLVMInt8Type(), 0)}, 1, 0),
+        puts_func,
+        args,
+        1,
+        ""
+    );
+}
+
+// Generate LLVM IR for a statement
+void codegen_statement(CodeGenerator *gen, Stmt *stmt) {
+    switch (stmt->type) {
+    case STMT_PRINT:
+        codegen_print_stmt(gen, stmt->data.print_stmt.value);
+        break;
+    case STMT_PRINTLN:
+        codegen_println_stmt(gen, stmt->data.println_stmt.value);
+        break;
+    default:
+        fprintf(stderr, "Unknown statement type in codegen\n");
+        break;
+    }
+}
+
+// Generate LLVM IR for a function
+LLVMValueRef codegen_function(CodeGenerator *gen, ParseFunc *func) {
+    LLVMTypeRef func_type = LLVMFunctionType(LLVMVoidType(), NULL, 0, 0);
+    LLVMValueRef llvm_func = LLVMAddFunction(gen->module, func->name, func_type);
+    
+    LLVMBasicBlockRef entry = LLVMAppendBasicBlock(llvm_func, "entry");
+    LLVMPositionBuilderAtEnd(gen->builder, entry);
+    
+    Stmt *stmt = func->stmt_list;
+    while (stmt) {
+        codegen_statement(gen, stmt);
+        stmt = stmt->next;
+    }
+    
+    LLVMBuildRetVoid(gen->builder);
+    
+    if (LLVMVerifyFunction(llvm_func, LLVMPrintMessageAction)) {
+        fprintf(stderr, "Function verification failed\n");
+    }
+    
+    return llvm_func;
+}
+
+// Dump LLVM IR to stdout
+void codegen_dump(CodeGenerator *gen) {
+    printf("=== LLVM DUMP ===");
+    char *ir = LLVMPrintModuleToString(gen->module);
+    printf("%s\n", ir);
+    LLVMDisposeMessage(ir);
+}
+
+int check_if_main() {
+    for (int i = 0; i < func_index; i++) {
+        if (strcmp(funcs[i], "main") == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Write LLVM IR to file
+void codegen_write_to_file(CodeGenerator *gen, const char *filename) {
+    if (!check_if_main()) {
+        fprintf(stderr, "There is no main function in the source code");
+        exit(1);
+    }
+    char *error = NULL;
+    if (LLVMPrintModuleToFile(gen->module, filename, &error)) {
+        fprintf(stderr, "Error writing to file: %s\n", error);
+        LLVMDisposeMessage(error);
+    } else {
+        printf("LLVM IR written to %s\n", filename);
+    }
+}
+
+// Cleanup
+void codegen_cleanup(CodeGenerator *gen) {
+    LLVMDisposeBuilder(gen->builder); 
+    LLVMDisposeModule(gen->module);
+    free(gen);
 }
 
 void parse(Token *t) {
@@ -385,11 +542,10 @@ void parse(Token *t) {
     case TOK_FN:
         {
             ParseFunc *func = parse_function();
-            execute_function(func);
             
-            // Clean up
+            codegen_function(codegen, func);
+            
             free(func->name);
-            // TODO: free statement list
             free(func);
         }
         break;
@@ -398,14 +554,77 @@ void parse(Token *t) {
     }
 }
 
-int main() {
-    const char *source = "fn hello() { println(\"foo\"); println(\"bar\"); }";
-    lexer_init(&lexer, source, "example.lang");
+void usage() {
+    printf("USAGE: [file_name]");
+    exit(1);
+}
+
+void strip_extension(char *filename) {
+    char *dot = strrchr(filename, '.');
+    if (dot != NULL) {
+        *dot = '\0'; 
+    }
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, "Not enough args\n");
+        usage();
+    } else if (argc > 2) {
+        fprintf(stderr, "Passed too many args\n");
+        usage();
+    } 
+    
+    char *filename = argv[1];
+    FILE *f = fopen(filename, "r");
+    if (!f) {
+        fprintf(stderr, "Error: could not open file '%s'\n", filename);
+        exit(1);
+    }
+    
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    rewind(f);
+
+    char *source = malloc(size + 1);
+    if (!source) {
+        fprintf(stderr, "Memory allocation failed\n");
+        fclose(f);
+        exit(1);
+    }
+    
+    size_t read_bytes = fread(source, 1, size, f);
+    source[read_bytes] = '\0';
+    fclose(f);
+    
+    char *ll_file_name = malloc(strlen(filename) + 4);
+    if (!ll_file_name) {
+        fprintf(stderr, "Memory allocation failed\n");
+        free(source);
+        exit(1);
+    }
+    strcpy(ll_file_name, filename);
+    
+    char *dot = strrchr(ll_file_name, '.');
+    if (dot != NULL) {
+        *dot = '\0';
+    }
+    strcat(ll_file_name, ".ll");
+
+    codegen = codegen_init("dystopia_module");
+    lexer_init(&lexer, source, filename);
     
     Token *tok = get_next_tok(&lexer);
     while (tok->type != TOK_EOF) {
         parse(tok);
         tok = get_next_tok(&lexer);
     }
+    
+    codegen_write_to_file(codegen, ll_file_name);
+    
+    codegen_cleanup(codegen);
+    free(source);
+    free(ll_file_name);
+    
     return 0;
 }
