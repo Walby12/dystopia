@@ -2,179 +2,228 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
-
+#include <stdarg.h> 
 
 typedef enum {
     TOK_FN,
+    TOK_PRINT,
+    TOK_PRINTLN,
     TOK_ID,
     TOK_OPAREN,
     TOK_CPAREN,
     TOK_SEMICOLON,
     TOK_OCURLY,
     TOK_CCURLY,
+    TOK_STRING,
     TOK_EOF,
 } TokenType;
 
 typedef struct {
+    int line;
+    int column;
+    const char *filename;
+} SourceLocation;
+
+typedef struct {
     TokenType type;
     char *str;
+    SourceLocation loc;
 } Token;
 
 typedef struct {
     char *cur_char;
     size_t index;
+    int line;
+    int column;
+    const char *filename;
 } Lexer;
-
-Token token = {0};
-Lexer lexer = {0};
 
 typedef enum {
     STMT_PRINT,
-    // Easy to add more later:
-    // STMT_RETURN,
-    // STMT_ASSIGN,
-    // STMT_IF,
-    // STMT_WHILE,
-    // etc.
+    STMT_PRINTLN,
 } StmtType;
 
 typedef struct Stmt {
     StmtType type;
     union {
         struct {
-            Token *value;  // What to print
+            Token *value;
         } print_stmt;
-        
-        // Add new statement types here as you need them:
-        // struct {
-        //     Token *expr;
-        // } return_stmt;
-        // 
-        // struct {
-        //     char *var_name;
-        //     Token *value;
-        // } assign_stmt;
+        struct {
+            Token *value;
+        } println_stmt;
     } data;
-    struct Stmt *next;  // For linking multiple statements
+    struct Stmt *next;
 } Stmt;
 
 typedef struct {
     char *name;
     char *return_type;
-    Stmt *stmt_list;  // Head of statement linked list
+    Stmt *stmt_list;
 } ParseFunc;
 
-
+Token token = {0};
+Lexer lexer = {0};
 int line_lex = 0;
 
-Token* new_fn() {
+Token* get_next_tok(Lexer *l);
+Token* new_token(TokenType type, char *str, SourceLocation loc);
+
+void lexer_init(Lexer *l, const char *source, const char *filename) {
+    l->cur_char = (char*)source;
+    l->index = 0;
+    l->line = 1;
+    l->column = 1;
+    l->filename = filename;
+}
+
+Token* new_token(TokenType type, char *str, SourceLocation loc) {
     Token *t = malloc(sizeof(Token));
-    t->type = TOK_FN;
-    t->str = NULL;
+    t->type = type;
+    t->str = str;
+    t->loc = loc;
     return t;
 }
 
-Token* new_id(char *c) {
-    Token *t = malloc(sizeof(Token));
-    t->type = TOK_ID;
-    t->str = c;
-    return t;
+void error_at(SourceLocation loc, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    
+    fprintf(stderr, "\033[1;31mError\033[0m at %s:%d:%d: ", 
+            loc.filename ? loc.filename : "<input>", 
+            loc.line, 
+            loc.column);
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    
+    va_end(args);
+    exit(1);
 }
 
-Token* new_oparen() {
-    Token *t = malloc(sizeof(Token));
-    t->type = TOK_OPAREN;
-    t->str = NULL;
-    return t;
+void error_tok(Token *tok, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    
+    fprintf(stderr, "\033[1;31mError\033[0m at %s:%d:%d: ", 
+            tok->loc.filename ? tok->loc.filename : "<input>",
+            tok->loc.line, 
+            tok->loc.column);
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    
+    if (tok->str) {
+        fprintf(stderr, "  near: '%s'\n", tok->str);
+    }
+    
+    va_end(args);
+    exit(1);
 }
 
-Token* new_cparen() {
-    Token *t = malloc(sizeof(Token));
-    t->type = TOK_CPAREN;
-    t->str = NULL;
-    return t;
-}
-
-Token* new_semiclon() {
-    Token *t = malloc(sizeof(Token));
-    t->type = TOK_SEMICOLON;
-    t->str = NULL;
-    return t;
-}
-
-Token* new_ocurly() {
-    Token *t = malloc(sizeof(Token));
-    t->type = TOK_OCURLY;
-    t->str = NULL;
-    return t;
-}
-
-Token* new_ccurly() {
-    Token *t = malloc(sizeof(Token));
-    t->type = TOK_CCURLY;
-    t->str = NULL;
-    return t;
-}
-
-Token* new_eof() {
-    Token *t = malloc(sizeof(Token));
-    t->type = TOK_EOF;
-    t->str = NULL;
-    return t;
+void warn_tok(Token *tok, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    
+    fprintf(stderr, "\033[1;33mWarning\033[0m at %s:%d:%d: ", 
+            tok->loc.filename ? tok->loc.filename : "<input>",
+            tok->loc.line, 
+            tok->loc.column);
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    
+    va_end(args);
 }
 
 Token* get_next_tok(Lexer *l) {
-    while (1) {  // Loop to skip whitespace
-        switch (l->cur_char[l->index]) {
+    while (1) {
+        char c = l->cur_char[l->index];
+        
+        SourceLocation loc = {l->line, l->column, l->filename};
+        
+        switch (c) {
         case '(':
             l->index++;
-            return new_oparen();
+            l->column++;
+            return new_token(TOK_OPAREN, NULL, loc);
         case ')':
             l->index++;
-            return new_cparen();
-        case ';':
-            l->index++;
-            return new_semiclon();
+            l->column++;
+            return new_token(TOK_CPAREN, NULL, loc);
         case '{':
             l->index++;
-            return new_ocurly();
-        case '}':
+            l->column++;
+            return new_token(TOK_OCURLY, NULL, loc);
+        case '}': 
             l->index++;
-            return new_ccurly();
+            l->column++;
+            return new_token(TOK_CCURLY, NULL, loc);
+        case ';':
+            l->index++;
+            l->column++;
+            return new_token(TOK_SEMICOLON, NULL, loc);
         case '\n':
             l->index++;
-            line_lex++;
+            l->line++;
+            l->column = 1;
             break;
-        case ' ':  
-            l->index++;
-            break; 
+        case ' ':
         case '\t':
             l->index++;
-            break; 
+            l->column++;
+            break;
         case '\0':
-            return new_eof();
-        default:
-            if (isalpha(l->cur_char[l->index])) {
-                char str[256];
-                int j = 0;
-                while (isalpha(l->cur_char[l->index]) && j < sizeof(str) - 1) {
+            return new_token(TOK_EOF, NULL, loc);
+        case '\"':
+            {
+                l->index++;
+                l->column++;
+                char str[1024];
+                size_t j = 0;
+                while (j < sizeof(str) - 1 && 
+                       l->cur_char[l->index] != '\0' && 
+                       l->cur_char[l->index] != '\"') {
+                    if (l->cur_char[l->index] == '\n') {
+                        l->line++;
+                        l->column = 1;
+                    } else {
+                        l->column++;
+                    }
                     str[j++] = l->cur_char[l->index++];
                 }
                 str[j] = '\0';
-                if (strcmp(str, "fn") == 0) {
-                    return new_fn();
+                
+                if (l->cur_char[l->index] == '\"') {
+                    l->index++;
+                    l->column++;
                 } else {
-                    return new_id(strdup(str));
+                    error_at(loc, "unterminated string literal");
+                }
+                
+                return new_token(TOK_STRING, strdup(str), loc);
+            }
+        default:
+            if (isalpha(c)) {
+                char str[256];
+                size_t j = 0;
+                while (isalpha(l->cur_char[l->index]) && j < sizeof(str) - 1) {
+                    str[j++] = l->cur_char[l->index++];
+                    l->column++;
+                }
+                str[j] = '\0';
+                if (strcmp(str, "fn") == 0) {
+                    return new_token(TOK_FN, NULL, loc);
+                } else if (strcmp(str, "print") == 0) {
+                    return new_token(TOK_PRINT, NULL, loc);
+                } else if(strcmp(str, "println") == 0) {
+                    return new_token(TOK_PRINTLN, NULL, loc);
+                } else {
+                    return new_token(TOK_ID, strdup(str), loc);
                 }
             }
-            fprintf(stderr, "Error: unknown char: %c at line %d\n", l->cur_char[l->index], line_lex);
-            exit(1);
+            error_at(loc, "unexpected character '%c'", c);
         }
     }
 }
 
-
-// Helper function to create a print statement
 Stmt* new_print_stmt(Token *value) {
     Stmt *s = malloc(sizeof(Stmt));
     s->type = STMT_PRINT;
@@ -183,7 +232,14 @@ Stmt* new_print_stmt(Token *value) {
     return s;
 }
 
-// Add a statement to the end of a function's statement list
+Stmt* new_println_stmt(Token *value) {
+    Stmt *s = malloc(sizeof(Stmt));
+    s->type = STMT_PRINTLN;
+    s->data.println_stmt.value = value;
+    s->next = NULL;
+    return s;
+}
+
 void add_stmt(ParseFunc *func, Stmt *new_stmt) {
     if (func->stmt_list == NULL) {
         func->stmt_list = new_stmt;
@@ -200,6 +256,10 @@ const char* to_string(TokenType t) {
     switch (t) {
     case TOK_SEMICOLON:
         return "semicolon";
+    case TOK_PRINT:
+        return "print";
+    case TOK_PRINTLN:
+        return "println";
     case TOK_ID:
         return "identifier";
     case TOK_FN:
@@ -212,6 +272,8 @@ const char* to_string(TokenType t) {
         return "open curly";
     case TOK_CCURLY:
         return "close curly";
+    case TOK_STRING:
+        return "string";
     case TOK_EOF:
         return "end of file";
     default:
@@ -219,26 +281,21 @@ const char* to_string(TokenType t) {
     }
 }
 
-// Expect a specific token type, error if not found
 Token* expect_token(TokenType expected, const char *context) {
     Token *tok = get_next_tok(&lexer);
     if (tok->type != expected) {
-        fprintf(stderr, "Error: expected token type %s in %s, got %s at line %d\n", 
-                to_string(expected), context, to_string(tok->type), line_lex);
-        exit(1);
+        error_tok(tok, "expected %s in %s, got %s",
+                  to_string(expected), context, to_string(tok->type));
     }
     return tok;
 }
 
-// Parse a print statement: print(value)
 Stmt* parse_print_stmt() {
-    // We've already consumed the "print" identifier
     expect_token(TOK_OPAREN, "print statement");
     
     Token *value = get_next_tok(&lexer);
-    if (value->type != TOK_ID) {
-        fprintf(stderr, "Error: expected identifier in print statement at line %d\n", line_lex);
-        exit(1);
+    if (value->type != TOK_STRING) {
+        error_tok(value, "expected string in print statement");
     }
     
     expect_token(TOK_CPAREN, "print statement");
@@ -247,80 +304,59 @@ Stmt* parse_print_stmt() {
     return new_print_stmt(value);
 }
 
-// Parse a statement (currently only print, but expandable)
-Stmt* parse_stmt() {
-    Token *tok = get_next_tok(&lexer);
+Stmt* parse_println_stmt() {
+    expect_token(TOK_OPAREN, "println statement");
     
-    if (tok->type == TOK_ID) {
-        if (strcmp(tok->str, "print") == 0) {
-            return parse_print_stmt();
-        }
-        // Add more statement types here:
-        // else if (strcmp(tok->str, "return") == 0) {
-        //     return parse_return_stmt();
-        // }
-        // else if (strcmp(tok->str, "if") == 0) {
-        //     return parse_if_stmt();
-        // }
-        else {
-            fprintf(stderr, "Error: unknown statement '%s' at line %d\n", tok->str, line_lex);
-            exit(1);
-        }
+    Token *value = get_next_tok(&lexer);
+    if (value->type != TOK_STRING) {
+        error_tok(value, "expected string in println statement");
     }
     
-    fprintf(stderr, "Error: expected statement at line %d\n", line_lex);
-    exit(1);
+    expect_token(TOK_CPAREN, "println statement");
+    expect_token(TOK_SEMICOLON, "println statement");
+    
+    return new_println_stmt(value);
 }
 
-// Parse a function: fn name() { statements }
 ParseFunc* parse_function() {
-    // Expect function name
     Token *func_name = get_next_tok(&lexer);
     if (func_name->type != TOK_ID) {
-        fprintf(stderr, "Error: function name expected after fn at line %d\n", line_lex);
-        exit(1);
+        error_tok(func_name, "function name expected after fn");
     }
-
     
     printf("Parsing function: %s\n", func_name->str);
     
-    // Create the function structure
     ParseFunc *func = malloc(sizeof(ParseFunc));
     func->name = strdup(func_name->str);
-    func->return_type = NULL;  // Can be extended later
+    func->return_type = NULL;
     func->stmt_list = NULL;
     
-    // Expect opening parenthesis
     expect_token(TOK_OPAREN, "function declaration");
-    
-    // Expect closing parenthesis (no parameters for now)
     expect_token(TOK_CPAREN, "function declaration");
     expect_token(TOK_OCURLY, "function declaration");
     
-    // Parse function body - for now, just parse statements until EOF
-    // You can add braces { } support later
     Token *peek = get_next_tok(&lexer);
-    while (peek->type != TOK_EOF) {
-        // Put the token back conceptually (or refactor to have a peek function)
-        // For now, we'll handle this differently
-        if (peek->type == TOK_ID && strcmp(peek->str, "print") == 0) {
+    while (peek->type != TOK_EOF && peek->type != TOK_CCURLY) {
+        if (peek->type == TOK_PRINT) {
             Stmt *stmt = parse_print_stmt();
             add_stmt(func, stmt);
-        } else if (peek->type == TOK_CCURLY) {
-            return func;
+        } else if (peek->type == TOK_PRINTLN) {
+            Stmt *stmt = parse_println_stmt();
+            add_stmt(func, stmt);
         } else {
-            fprintf(stderr, "Error: unexpected token in function body at line %d\n", line_lex);
-            exit(1);
+            error_tok(peek, "unexpected token in function body");
         }
         
         peek = get_next_tok(&lexer);
     }
-    expect_token(TOK_CCURLY, "function declaration");
+    
+    if (peek->type != TOK_CCURLY) {
+        error_tok(peek, "expected '}' at end of function");
+    }
 
     return func;
 }
 
-// Execute/interpret all statements in a function
 void execute_function(ParseFunc *func) {
     printf("Executing function: %s\n", func->name);
     Stmt *curr = func->stmt_list;
@@ -328,7 +364,12 @@ void execute_function(ParseFunc *func) {
         switch (curr->type) {
         case STMT_PRINT:
             if (curr->data.print_stmt.value && curr->data.print_stmt.value->str) {
-                printf(">> %s\n", curr->data.print_stmt.value->str);
+                printf("%s", curr->data.print_stmt.value->str);
+            }
+            break;
+        case STMT_PRINTLN:
+            if (curr->data.println_stmt.value && curr->data.println_stmt.value->str) {
+                printf("%s\n", curr->data.println_stmt.value->str);
             }
             break;
         default:
@@ -339,7 +380,6 @@ void execute_function(ParseFunc *func) {
     }
 }
 
-// Updated main parse function
 void parse(Token *t) {
     switch (t->type) {
     case TOK_FN:
@@ -347,7 +387,7 @@ void parse(Token *t) {
             ParseFunc *func = parse_function();
             execute_function(func);
             
-            // Clean up (you might want to keep functions around)
+            // Clean up
             free(func->name);
             // TODO: free statement list
             free(func);
@@ -359,10 +399,11 @@ void parse(Token *t) {
 }
 
 int main() {
-    lexer.cur_char = "fn hello() { print(foo); print(bar); }";
+    const char *source = "fn hello() { println(\"foo\"); println(\"bar\"); }";
+    lexer_init(&lexer, source, "example.lang");
+    
     Token *tok = get_next_tok(&lexer);
     while (tok->type != TOK_EOF) {
-        printf("%d\n", tok->type);
         parse(tok);
         tok = get_next_tok(&lexer);
     }
