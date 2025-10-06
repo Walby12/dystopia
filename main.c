@@ -12,6 +12,7 @@ typedef enum {
     TOK_FN,
     TOK_PRINT,
     TOK_PRINTLN,
+    TOK_INT,
     TOK_ID,
     TOK_OPAREN,
     TOK_CPAREN,
@@ -20,6 +21,7 @@ typedef enum {
     TOK_CCURLY,
     TOK_STRING,
     TOK_EMAIL,
+    TOK_RETURN,
     TOK_EOF,
 } TokenType;
 
@@ -64,6 +66,7 @@ typedef struct Stmt {
 typedef struct {
     char *name;
     char *return_type;
+    char *return_thing;
     Stmt *stmt_list;
 } ParseFunc;
 
@@ -234,9 +237,22 @@ Token* get_next_tok(Lexer *l) {
                     return new_token(TOK_PRINT, NULL, loc);
                 } else if(strcmp(str, "println") == 0) {
                     return new_token(TOK_PRINTLN, NULL, loc);
+                } else if (strcmp(str, "return") == 0) {
+                    return new_token(TOK_RETURN, NULL, loc);
                 } else {
                     return new_token(TOK_ID, strdup(str), loc);
                 }
+            } else if (isdigit(c)) {
+                char str[1024];
+                size_t j = 0;
+    
+                while (isdigit(l->cur_char[l->index]) && j < sizeof(str) - 1) {
+                    str[j++] = l->cur_char[l->index++];
+                    l->column++;
+                }
+                str[j] = '\0';
+    
+                return new_token(TOK_INT, strdup(str), loc);
             }
             error_at(loc, "unexpected character '%c'", c);
         }
@@ -295,6 +311,10 @@ const char* to_string(TokenType t) {
         return "string";
     case TOK_EMAIL:
         return "function return";
+    case TOK_INT:
+        return "integer";
+    case TOK_RETURN:
+        return "return";
     case TOK_EOF:
         return "end of file";
     default:
@@ -358,7 +378,7 @@ ParseFunc* parse_function() {
     
     expect_token(TOK_OPAREN, "function declaration");
     expect_token(TOK_CPAREN, "function declaration");
-    expect_token(TOK_EMAIL, "function declaration"); 
+    expect_token(TOK_EMAIL, "function declaration");
     
     Token *func_ret = get_next_tok(&lexer);
     if (func_ret->type != TOK_ID) {
@@ -383,15 +403,42 @@ ParseFunc* parse_function() {
         } else if (peek->type == TOK_PRINTLN) {
             Stmt *stmt = parse_println_stmt();
             add_stmt(func, stmt);
-        } else {
+        } else if (peek->type == TOK_RETURN) {
+            Token *return_val = get_next_tok(&lexer);
+    
+            if (func->return_type && strcmp(func->return_type, "int") == 0) {
+                if (return_val->type != TOK_INT) {
+                    error_at(return_val->loc, "expected an integer for a func that returns an int");
+                }
+                func->return_thing = strdup(return_val->str);
+            } else if (func->return_type && strcmp(func->return_type, "void") == 0) {
+                if (return_val->type != TOK_ID) {
+                    error_at(return_val->loc, "expected to return void a func that returns void");
+                } else {
+                    if (!(strcmp(return_val->str, "void") == 0)) {
+                        error_at(return_val->loc, "expected a to return void for a func that returns void");
+                    }
+                }
+            }
+    
+            Token *semi = get_next_tok(&lexer);
+
+            if (semi->type != TOK_SEMICOLON) {
+                error_tok(semi, "expected semicolon after return statement");
+            }
+    
+            break;
+        }
+         else {
             error_tok(peek, "unexpected token in function body");
         }
-        
+    
         peek = get_next_tok(&lexer);
     }
-    
+
+    peek = get_next_tok(&lexer);
     if (peek->type != TOK_CCURLY) {
-        error_tok(peek, "expected '}' at end of function");
+        error_tok(peek, "expected a '}' at the end of the func");
     }
 
     return func;
@@ -477,7 +524,12 @@ void codegen_statement(CodeGenerator *gen, Stmt *stmt) {
 
 // Generate LLVM IR for a function
 LLVMValueRef codegen_function(CodeGenerator *gen, ParseFunc *func) {
-    LLVMTypeRef func_type = LLVMFunctionType(LLVMVoidType(), NULL, 0, 0);
+    LLVMTypeRef func_type = NULL;
+    if (strcmp(func->return_type, "int") == 0) {
+        func_type = LLVMFunctionType(LLVMInt32Type(), NULL, 0, 0);
+    } else if (strcmp(func->return_type, "void") == 0) {
+        func_type = LLVMFunctionType(LLVMVoidType(), NULL, 0, 0);
+    }
     LLVMValueRef llvm_func = LLVMAddFunction(gen->module, func->name, func_type);
     
     LLVMBasicBlockRef entry = LLVMAppendBasicBlock(llvm_func, "entry");
@@ -488,8 +540,12 @@ LLVMValueRef codegen_function(CodeGenerator *gen, ParseFunc *func) {
         codegen_statement(gen, stmt);
         stmt = stmt->next;
     }
-    
-    LLVMBuildRetVoid(gen->builder);
+    if (strcmp(func->return_type, "int") == 0) {
+        LLVMValueRef z = LLVMConstInt(LLVMInt32Type(), atoi(func->return_thing), 0);
+        LLVMBuildRet(gen->builder, z);
+    } else if (strcmp(func->return_type, "void") == 0) {
+        LLVMBuildRetVoid(gen->builder);
+    }
     
     if (LLVMVerifyFunction(llvm_func, LLVMPrintMessageAction)) {
         fprintf(stderr, "Function verification failed\n");
@@ -525,9 +581,7 @@ void codegen_write_to_file(CodeGenerator *gen, const char *filename) {
     if (LLVMPrintModuleToFile(gen->module, filename, &error)) {
         fprintf(stderr, "Error writing to file: %s\n", error);
         LLVMDisposeMessage(error);
-    } else {
-        printf("LLVM IR written to %s\n", filename);
-    }
+    } 
 }
 
 // Cleanup

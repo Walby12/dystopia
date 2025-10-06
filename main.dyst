@@ -1,3 +1,4 @@
-fn main() @int {
+fn main() @void {
     println("Hello world");
+    return void;
 }
